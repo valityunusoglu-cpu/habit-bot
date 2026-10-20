@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Трекер</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/assets/style.css?v=1">
+</head>
+<body>
+  <main id="view"></main>
+
+  <nav class="tabbar" id="tabbar">
+    <button data-act="tab" data-tab="today">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9"/></svg>
+      <span>Сегодня</span>
+    </button>
+    <button data-act="tab" data-tab="month">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="16" rx="3"/><path d="M3.5 9.5h17M8 2.8v3.4M16 2.8v3.4M8 13.5h.01M12 13.5h.01M16 13.5h.01M8 17h.01M12 17h.01"/></svg>
+      <span>Месяц</span>
+    </button>
+    <button data-act="tab" data-tab="notes">
+      <svg viewBox="0 0 24 24"><path d="M6.5 3.5h7.5l4.5 4.5v12.5h-12z"/><path d="M14 3.5V8h4.5M9.5 12.5h5M9.5 16h5"/></svg>
+      <span>Заметки</span>
+    </button>
+    <button data-act="tab" data-tab="habits">
+      <svg viewBox="0 0 24 24"><path d="M10 6.5h10M10 12h10M10 17.5h10"/><circle cx="5" cy="6.5" r="1.3"/><circle cx="5" cy="12" r="1.3"/><circle cx="5" cy="17.5" r="1.3"/></svg>
+      <span>Привычки</span>
+    </button>
+  </nav>
+
+  <div id="sheet"></div>
+  <div id="toast"></div>
+
+  <script src="/assets/app.js?v=1"></script>
+</body>
+</html>

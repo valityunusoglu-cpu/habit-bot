@@ -1,0 +1,16 @@
+# Настройки для Render (New → Blueprint). Секретные значения Render спросит при создании.
+services:
+  - type: web
+    name: habit-tracker
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Damascus
