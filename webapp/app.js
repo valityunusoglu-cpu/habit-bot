@@ -20,7 +20,10 @@ const S = {
   mclosed: {},  // свёрнутые группы в таблице месяца
   draft: null,  // черновик привычки в редакторе
   locked: false,
+  ib: null, food: null, wk: null, settings: null,
+  wkPick: null, pick: null, tb: null,
 };
+const SUBTABS = { month: 'more', notes: 'more', habits: 'more', profile: 'more' };
 
 /* ───────── помощники ───────── */
 const $ = s => document.querySelector(s);
@@ -101,6 +104,11 @@ async function reload() {
   try {
     if (S.tab === 'month') await loadMonth(S.ym);
     else if (S.tab === 'notes') await loadNotes();
+    else if (S.tab === 'ibadah') await loadIb();
+    else if (S.tab === 'food') await loadFood();
+    else if (S.tab === 'sport') await loadWk();
+    else if (S.tab === 'profile') S.settings = await api('/api/settings');
+    else if (S.tab === 'more') { /* меню */ }
     else await loadState(S.day);
   } catch (e) { /* сообщение уже показано */ }
   render();
@@ -110,13 +118,17 @@ async function reload() {
 const loader = () => '<div class="loader">Загрузка…</div>';
 
 function render() {
-  $$('#tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === S.tab));
+  const group = SUBTABS[S.tab] || S.tab;
+  $$('#tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === group));
   const v = $('#view');
   if (S.locked) {
     v.innerHTML = `<div class="locked"><b>Нет доступа</b>${esc(S.locked)}</div>`;
     return;
   }
-  v.innerHTML = S.tab === 'month' ? viewMonth() : S.tab === 'notes' ? viewNotes() : S.tab === 'habits' ? viewHabits() : viewToday();
+  const views = { month: viewMonth, notes: viewNotes, habits: viewHabits, ibadah: viewIbadah, food: viewFood,
+    sport: viewSport, more: viewMore, profile: viewProfile };
+  v.innerHTML = (SUBTABS[S.tab] ? '<button class="backlink" data-act="tab" data-tab="more">' + ICON.left + 'Ещё</button>' : '')
+    + (views[S.tab] || viewToday)();
   if (S.tab === 'month') scrollMonthToToday();
 }
 
@@ -464,10 +476,9 @@ const ACT = {
   close: closeSheet,
 
   async day(el) {
-    S.day = addDays(S.day, +el.dataset.n);
+    S.day = addDays(S.day || S.today, +el.dataset.n);
     haptic('light');
-    try { await loadState(S.day); } catch (e) {}
-    render();
+    await reload();
   },
   async gotoday() { S.day = null; await reload(); },
   expand(el) { S.open[el.dataset.id] = !S.open[el.dataset.id]; haptic('light'); render(); },
@@ -590,6 +601,605 @@ const ACT = {
     closeSheet(); await reload();
   },
 };
+
+/* ═════════════════════ Ибадат, Еда, Спорт, Ещё ═════════════════════ */
+
+const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+const fmtDur = m => { const h = Math.floor(m / 60), mm = m % 60; return h ? `${h} ч ${mm} мин` : `${mm} мин`; };
+const r0 = x => Math.round(x);
+const r1 = x => Math.round(x * 10) / 10;
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+async function loadIb() { S.ib = await api('/api/ibadah' + (S.day ? `?day=${S.day}` : '')); S.day = S.ib.date; S.today = S.ib.today; }
+async function loadFood() { S.food = await api('/api/food' + (S.day ? `?day=${S.day}` : '')); S.day = S.food.date; S.today = S.food.today; }
+async function loadWk() { S.wk = await api('/api/workout' + (S.day ? `?day=${S.day}` : '')); S.day = S.wk.date; S.today = S.wk.today; }
+
+function dayHead(d, today) {
+  const label = d === today ? 'Сегодня' : d === addDays(today, -1) ? 'Вчера' : d === addDays(today, 1) ? 'Завтра'
+    : WD_FULL[wdOf(d)][0].toUpperCase() + WD_FULL[wdOf(d)].slice(1);
+  return `<div class="dayhead">
+      <button class="iconbtn" data-act="day" data-n="-1" aria-label="Предыдущий день">${ICON.left}</button>
+      <div class="daytitle"><div class="big">${label}</div><div class="sub">${humanDay(d)}</div></div>
+      <button class="iconbtn" data-act="day" data-n="1" aria-label="Следующий день">${ICON.right}</button>
+    </div>${d === today ? '' : '<button class="linkbtn" data-act="gotoday">Вернуться к сегодня</button>'}`;
+}
+
+function switchHTML(on) { return `<span class="switch"><input type="checkbox" ${on ? 'checked' : ''} tabindex="-1"><i></i></span>`; }
+
+/* ───────── Ибадат ───────── */
+function azkarItems(set) {
+  if (set === 'ap') return AFTER_PRAYER.map(x => x.ref ? { ...AZKAR.find(a => a.id === x.ref), id: x.id, n: x.n, note: x.note } : x);
+  return AZKAR.filter(a => !a.when || a.when === set).map(a => set === 'e' && a.ar_e
+    ? { ...a, title: a.title_e || a.title, ar: a.ar_e, tr: a.tr_e, ru: a.ru_e } : a);
+}
+const azKey = (set, day) => `az:${day}:${set}`;
+function azProgress(set, day) {
+  const items = azkarItems(set), c = lsGet(azKey(set, day), {});
+  return [items.filter(it => (c[it.id] || 0) >= it.n).length, items.length];
+}
+
+function viewIbadah() {
+  const I = S.ib;
+  if (!I) return loader();
+  const M = new Set(I.marks), isToday = I.date === I.today, future = I.date > I.today;
+  let hero = '';
+  if (isToday) {
+    const nowM = toMin(I.now);
+    const nx = PRAYER_LIST.find(p => toMin(I.times[p.key]) > nowM);
+    const name = nx ? nx.name : 'Фаджр', t = nx ? I.times[nx.key] : I.tomorrow_fajr;
+    const diff = (toMin(t) + (nx ? 0 : 1440)) - nowM;
+    hero = `<div class="hero"><div><small>Следующий${nx && nx.info ? '' : ' намаз'}</small><b>${name}</b></div>
+      <div class="hero-r"><b>${t}</b><small>через ${fmtDur(diff)}</small></div></div>`;
+  }
+  const fardDone = FARD_KEYS.filter(k => M.has('fard_' + k)).length;
+  const rows = PRAYER_LIST.map(p => {
+    if (p.info) return `<div class="prow info"><div class="ptime">${I.times[p.key]}</div><div class="pmain"><div class="rtitle">${p.name}</div><div class="rmeta"><span>время намаза Фаджр заканчивается</span></div></div></div>`;
+    const fk = 'fard_' + p.key;
+    const chips = p.sunnah.map(s => {
+      const k = `sun_${p.key}_${s.k}`;
+      return `<button class="chip ${M.has(k) ? 'on' : ''} ${future ? 'disabled' : ''}" data-act="mark" data-key="${k}">${s.label}${s.m ? '<i>•</i>' : ''}</button>`;
+    }).join('');
+    return `<div class="prow ${future ? 'disabled' : ''}">
+      <div class="ptime">${I.times[p.key]}</div>
+      <div class="pmain"><div class="rtitle">${p.name}</div><div class="chips">${chips}</div></div>
+      <button class="check big ${M.has(fk) ? 'on' : ''}" data-act="mark" data-key="${fk}" aria-label="Фард">${ICON.check}</button>
+    </div>`;
+  }).join('');
+  const extra = EXTRA_PRAYERS.map(x => `
+    <div class="row ${future ? 'disabled' : ''}" data-act="mark" data-key="${x.key}">
+      <span class="check ${M.has(x.key) ? 'on' : ''}">${ICON.check}</span>
+      <div class="rmain"><div class="rtitle">${x.name}</div><div class="rmeta"><span>${x.note}</span></div></div>
+    </div>`).join('');
+  const azRow = (set, name, sub) => {
+    const [k, n] = azProgress(set, I.date), done = M.has('azkar_' + set) || (n && k === n);
+    return `<div class="row" data-act="azkar" data-set="${set}">
+      <span class="ring ${done ? 'full' : ''}" style="--p:${n ? k / n : 0}">${done ? ICON.check : ''}</span>
+      <div class="rmain"><div class="rtitle">${name}</div><div class="rmeta"><span>${sub} · ${k} из ${n}</span></div></div>
+      <span class="chev">${ICON.right}</span></div>`;
+  };
+  const tbTotal = lsGet(`tb:${I.date}`, 0);
+  return `${dayHead(I.date, I.today)}
+    ${hero}
+    <div class="sec-h"><span>Намазы</span><small>фард ${fardDone} из 5</small></div>
+    <div class="card">${rows}</div>
+    <p class="hint">Кружок справа — фард. Кнопки под названием — сунна-намазы (точка • — сунна-муаккада). Фард отмечается и в привычке «Намаз».</p>
+
+    <div class="sec-h"><span>Дополнительно</span></div>
+    <div class="card ckl">${extra}
+      <div class="row ${future ? 'disabled' : ''}" data-act="mark" data-key="quran">
+        <span class="check ${M.has('quran') ? 'on' : ''}">${ICON.check}</span>
+        <div class="rmain"><div class="rtitle">Коран</div><div class="rmeta"><span>хотя бы 1 страница</span></div></div>
+      </div>
+    </div>
+
+    <div class="sec-h"><span>Азкары и зикр</span></div>
+    <div class="card ckl">
+      ${azRow('m', 'Утренние азкары', 'после Фаджра')}
+      ${azRow('e', 'Вечерние азкары', 'после Асра')}
+      ${azRow('ap', 'Азкары после намаза', 'после каждого фарда')}
+      <div class="row" data-act="tasbih">
+        <span class="tbicon">${ICON.tasbih}</span>
+        <div class="rmain"><div class="rtitle">Тасбих</div><div class="rmeta"><span>${tbTotal ? `сегодня ${tbTotal}` : 'электронные чётки'}</span></div></div>
+        <span class="chev">${ICON.right}</span></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="row" data-act="pnotify">
+        <div class="rmain"><div class="rtitle">Напоминать о намазе</div><div class="rmeta"><span>бот напишет в начале времени</span></div></div>
+        ${switchHTML(I.settings.prayer_notify !== '0')}
+      </div>
+    </div>
+    <p class="hint">Город: <b>${esc(I.city)}</b>. ${I.city.includes('Турция') ? 'Время по методу Diyanet, как в мечетях Турции.' : 'Время по методу Лиги исламского мира (Фаджр 18°, Иша 17°).'} Город и поправки в минутах меняются в «Ещё → Профиль».</p>`;
+}
+const FARD_KEYS = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
+const CITY_NAMES = { izmit: 'Измит, Турция', idlib: 'Идлиб, Сирия', harim: 'Харим, Сирия', fuah: 'Фуа, Сирия' };
+
+function azkarSheetHTML(set) {
+  const day = S.ib.date, c = lsGet(azKey(set, day), {}), items = azkarItems(set);
+  const pref = lsGet('az:pref', { tr: true, ru: true });
+  const title = { m: 'Утренние азкары', e: 'Вечерние азкары', ap: 'После намаза' }[set];
+  const k = items.filter(it => (c[it.id] || 0) >= it.n).length;
+  return `<h3>${title}</h3>
+    <div class="seg small">
+      <button class="${pref.tr ? 'on' : ''}" data-act="azpref" data-k="tr">Транскрипция</button>
+      <button class="${pref.ru ? 'on' : ''}" data-act="azpref" data-k="ru">Перевод</button>
+    </div>
+    <div class="azprog"><div class="bar"><i style="width:${items.length ? k / items.length * 100 : 0}%"></i></div><span>${k} из ${items.length}</span></div>
+    ${items.map(it => {
+      const n = c[it.id] || 0, done = n >= it.n;
+      return `<div class="zk ${done ? 'done' : ''}" data-act="zk" data-set="${set}" data-id="${it.id}" id="zk-${it.id}">
+        <div class="zk-h"><b>${esc(it.title)}</b>${it.note ? `<small>${esc(it.note)}</small>` : ''}</div>
+        <div class="ar" dir="rtl" lang="ar">${it.ar}</div>
+        ${pref.tr ? `<div class="tr">${esc(it.tr)}</div>` : ''}
+        ${pref.ru ? `<div class="ru">${esc(it.ru)}</div>` : ''}
+        <div class="zk-c"><span>${done ? ICON.check + 'Готово' : 'Нажми, чтобы засчитать'}</span><b>${Math.min(n, it.n)} / ${it.n}</b></div>
+      </div>`;
+    }).join('')}
+    <button class="btn" data-act="azreset" data-set="${set}">Сбросить счётчики</button>`;
+}
+function refreshSheet(html) {
+  const b = $('#sheet .sheet-body');
+  if (!b) return;
+  const top = b.scrollTop;
+  b.innerHTML = '<div class="grab"></div>' + html;
+  b.scrollTop = top;
+}
+
+function tasbihHTML() {
+  const T = S.tb, P = TASBIH.find(x => x.id === T.preset), st = P.seq[Math.min(T.step, P.seq.length - 1)];
+  const finished = T.step >= P.seq.length;
+  const total = lsGet(`tb:${S.ib ? S.ib.date : S.today}`, 0);
+  const goal = st.n;
+  return `<h3>Тасбих</h3>
+    <div class="tb-presets">${TASBIH.map(x => `<button class="chip ${x.id === T.preset ? 'on' : ''}" data-act="tbpreset" data-id="${x.id}">${x.name}</button>`).join('')}</div>
+    <div class="tb-text">
+      ${st.ar ? `<div class="ar" dir="rtl" lang="ar">${st.ar}</div>` : ''}
+      <div class="tr">${esc(st.tr)}</div><div class="ru">${esc(st.ru)}</div>
+    </div>
+    ${P.seq.length > 1 ? `<div class="tb-steps">${P.seq.map((s, i) => `<i class="${i < T.step ? 'ok' : i === T.step ? 'cur' : ''}"></i>`).join('')}</div>` : ''}
+    <button class="tb-btn ${finished ? 'fin' : ''}" data-act="tbtap" style="--p:${goal && !finished ? T.count / goal : finished ? 1 : 0}">
+      <span><b>${finished ? ICON.check : T.count}</b><small>${finished ? 'Готово' : goal ? `из ${goal}` : 'нажимай'}</small></span>
+    </button>
+    <div class="btn-row"><button class="btn" data-act="tbreset">Сбросить</button></div>
+    <p class="hint" style="text-align:center">Всего за сегодня: ${total}</p>`;
+}
+
+/* ───────── Еда ───────── */
+function currentWeight(F) {
+  const w = F.weights.length ? F.weights[F.weights.length - 1].kg : +F.settings.start_weight;
+  return w || 48.5;
+}
+function calcTargets(st, w) {
+  const h = +st.height || 170, a = +st.age || 25;
+  const bmr = 10 * w + 6.25 * h - 5 * a + 5;
+  const kcal = Math.round((bmr * 1.5 + 500) / 50) * 50;
+  const p = Math.round(w * 2), f = Math.round(kcal * 0.27 / 9);
+  return { kcal, p, f, c: Math.round((kcal - p * 4 - f * 9) / 4) };
+}
+const foodById = id => FOODS.find(f => f.id === id);
+
+function sparkline(F, goal) {
+  const pts = F.weights;
+  if (pts.length < 2) return '';
+  const W = 300, H = 70, xs = pts.map(p => parseD(p.day).getTime()), ys = pts.map(p => p.kg);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys) - 0.5, y1 = Math.max(...ys) + 0.5;
+  const X = x => x1 === x0 ? W / 2 : 6 + (x - x0) / (x1 - x0) * (W - 12), Y = y => H - 6 - (y - y0) / (y1 - y0) * (H - 12);
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${X(xs[i]).toFixed(1)},${Y(ys[i]).toFixed(1)}`).join('');
+  const last = pts.length - 1;
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><path d="${d}"/><circle cx="${X(xs[last])}" cy="${Y(ys[last])}" r="3.5"/></svg>`;
+}
+
+function viewFood() {
+  const F = S.food;
+  if (!F) return loader();
+  const w = currentWeight(F), T = calcTargets(F.settings, w), goal = +F.settings.goal_weight || 60;
+  const start = +F.settings.start_weight || w;
+  const sum = F.items.reduce((a, it) => { a.kcal += it.kcal * it.qty; a.p += it.protein * it.qty; a.f += it.fat * it.qty; a.c += it.carbs * it.qty; return a; }, { kcal: 0, p: 0, f: 0, c: 0 });
+  const pct = (x, t) => Math.min(100, t ? x / t * 100 : 0);
+  const bar = (name, x, t, cls) => `<div class="mbar ${cls}"><div class="mbar-h"><span>${name}</span><b>${r0(x)}<small> / ${t} г</small></b></div><div class="bar"><i style="width:${pct(x, t)}%"></i></div></div>`;
+  const left = T.kcal - r0(sum.kcal);
+  const meals = MEALS.map(m => {
+    const its = F.items.filter(it => it.meal === m.key);
+    if (!its.length && m.key === 'late') return `<div class="sec-h"><span>${m.name}</span></div><div class="card ckl"><div class="row addrow" data-act="fadd" data-meal="${m.key}">${ICON.plus}<span>Добавить</span></div></div>`;
+    const kc = its.reduce((a, it) => a + it.kcal * it.qty, 0);
+    return `<div class="sec-h"><span>${m.name}</span>${its.length ? `<small>${r0(kc)} ккал</small>` : ''}</div>
+      <div class="card ckl">${its.map(it => `
+        <div class="row" data-act="fdel" data-id="${it.id}">
+          <span class="fdot"></span>
+          <div class="rmain"><div class="rtitle">${esc(it.name)}</div><div class="rmeta"><span>${it.qty === 1 ? '1 порция' : `${r1(it.qty)} порц.`} · белок ${r0(it.protein * it.qty)} г</span></div></div>
+          <span class="kc">${r0(it.kcal * it.qty)}</span>
+        </div>`).join('')}
+        <div class="row addrow" data-act="fadd" data-meal="${m.key}">${ICON.plus}<span>Добавить</span></div>
+      </div>`;
+  }).join('');
+  const toGoal = r1(goal - w), gained = r1(w - start);
+  return `${dayHead(F.date, F.today)}
+    <div class="card macros">
+      <div class="kring" style="--p:${pct(sum.kcal, T.kcal) / 100}">
+        <div><b>${r0(sum.kcal)}</b><small>из ${T.kcal} ккал</small></div>
+      </div>
+      <div class="mbars">
+        ${bar('Белки', sum.p, T.p, 'p')}${bar('Жиры', sum.f, T.f, 'f')}${bar('Углеводы', sum.c, T.c, 'c')}
+      </div>
+    </div>
+    <p class="hint center">${left > 0 ? `Осталось съесть <b>${left} ккал</b>` : 'Норма на день выполнена 💪'}</p>
+
+    <div class="btn-row">
+      <button class="btn" data-act="fplan">${ICON.list}План питания</button>
+      <button class="btn" data-act="weight">${ICON.scale}Вес</button>
+    </div>
+
+    <div class="card wcard" data-act="weight">
+      <div class="wrow">
+        <div><small>Сейчас</small><b>${w} кг</b></div>
+        <div><small>Набрано</small><b class="${gained >= 0 ? 'pos' : 'neg'}">${gained > 0 ? '+' : ''}${gained} кг</b></div>
+        <div><small>До цели</small><b>${toGoal > 0 ? toGoal + ' кг' : 'цель!'}</b></div>
+      </div>
+      ${sparkline(F, goal)}
+    </div>
+    ${meals}
+    <p class="hint">Норма считается от твоего веса, роста и возраста (Профиль во вкладке «Ещё») с запасом +500 ккал для набора. Взвешивайся раз в неделю утром натощак. Если 2 недели вес стоит — добавь ещё один перекус.</p>`;
+}
+
+function foodPickHTML() {
+  const P = S.pick;
+  if (P.food) {
+    const f = P.food, k = f.kcal * P.qty;
+    return `<h3>${esc(f.name)}</h3>
+      <p class="hint center" style="margin-top:-6px">1 порция = ${esc(f.portion || '1 порция')}</p>
+      <div class="field-row"><span>Порций</span>
+        <div class="stepper"><button data-act="fqty" data-n="-0.5">−</button><b>${r1(P.qty)}</b><button data-act="fqty" data-n="0.5">+</button></div></div>
+      <div class="field-row"><span>Приём пищи</span>
+        <select id="f-meal" class="sel">${MEALS.map(m => `<option value="${m.key}" ${m.key === P.meal ? 'selected' : ''}>${m.name}</option>`).join('')}</select></div>
+      <div class="fsum"><div><b>${r0(k)}</b><small>ккал</small></div><div><b>${r0(f.p * P.qty)}</b><small>белок</small></div><div><b>${r0(f.f * P.qty)}</b><small>жиры</small></div><div><b>${r0(f.c * P.qty)}</b><small>углев.</small></div></div>
+      <button class="btn primary" data-act="fsave">Добавить</button>
+      <button class="btn ghost" data-act="fback">Назад к списку</button>
+      ${f.custom ? `<button class="btn danger" data-act="fcdel" data-id="${f.cid}">Удалить из моих продуктов</button>` : ''}`;
+  }
+  if (P.custom) {
+    return `<h3>Свой продукт</h3>
+      <input id="c-name" class="field" placeholder="Название, например: Мамин плов" maxlength="100">
+      <input id="c-portion" class="field mt" placeholder="Порция, например: 1 тарелка" maxlength="40">
+      <div class="grid2">
+        <label class="lab">Ккал<input id="c-kcal" class="field" inputmode="decimal" placeholder="0"></label>
+        <label class="lab">Белок, г<input id="c-p" class="field" inputmode="decimal" placeholder="0"></label>
+        <label class="lab">Жиры, г<input id="c-f" class="field" inputmode="decimal" placeholder="0"></label>
+        <label class="lab">Углеводы, г<input id="c-c" class="field" inputmode="decimal" placeholder="0"></label>
+      </div>
+      <button class="btn primary" data-act="fcsave">Сохранить</button>
+      <button class="btn ghost" data-act="fback">Назад</button>`;
+  }
+  return `<h3>Добавить · ${MEALS.find(m => m.key === P.meal).name}</h3>
+    <input id="f-q" class="field" placeholder="Поиск продукта" autocomplete="off">
+    <div id="f-list" class="flist">${foodListHTML('')}</div>
+    <button class="btn" data-act="fcustom">${ICON.plus}Свой продукт</button>`;
+}
+function allFoods() {
+  const custom = (S.food.custom || []).map(c => ({ id: 'c' + c.id, cid: c.id, custom: true, name: c.name, portion: c.portion, kcal: c.kcal, p: c.protein, f: c.fat, c: c.carbs, cat: 'Мои продукты' }));
+  return [...custom, ...FOODS];
+}
+function foodListHTML(qs) {
+  const qq = qs.trim().toLowerCase();
+  const list = allFoods().filter(f => !qq || f.name.toLowerCase().includes(qq));
+  if (!list.length) return '<div class="empty">Не нашёл. Добавь свой продукт ниже.</div>';
+  let cat = '', out = '';
+  for (const f of list) {
+    if (f.cat !== cat) { cat = f.cat; out += `<div class="fcat">${cat}</div>`; }
+    out += `<div class="frow" data-act="fpick" data-id="${f.id}"><div><div class="rtitle">${esc(f.name)}</div><div class="rmeta"><span>${esc(f.portion || '')}</span></div></div><b>${r0(f.kcal)}</b></div>`;
+  }
+  return out;
+}
+function openFoodSheet() {
+  openSheet(foodPickHTML(), () => {
+    const q = $('#f-q');
+    if (q) q.addEventListener('input', () => { $('#f-list').innerHTML = foodListHTML(q.value); });
+  });
+}
+function rerenderFoodSheet() {
+  refreshSheet(foodPickHTML());
+  const q = $('#f-q');
+  if (q) q.addEventListener('input', () => { $('#f-list').innerHTML = foodListHTML(q.value); });
+}
+
+function planHTML() {
+  let tk = 0, tp = 0;
+  const parts = MEALS.filter(m => MEAL_PLAN[m.key]).map(m => {
+    const its = MEAL_PLAN[m.key].map(([id, q]) => ({ f: foodById(id), q }));
+    const k = its.reduce((a, x) => a + x.f.kcal * x.q, 0), p = its.reduce((a, x) => a + x.f.p * x.q, 0);
+    tk += k; tp += p;
+    return `<div class="plan">
+      <div class="plan-h"><b>${m.name}</b><span>${r0(k)} ккал · ${r0(p)} г белка</span></div>
+      ${its.map(x => `<div class="plan-i"><span>${esc(x.f.name)}${x.q !== 1 ? ` × ${x.q}` : ''}</span><small>${r0(x.f.kcal * x.q)}</small></div>`).join('')}
+      <button class="btn small" data-act="fplanadd" data-meal="${m.key}">Добавить в дневник</button>
+    </div>`;
+  }).join('');
+  return `<h3>План питания на день</h3>
+    <p class="hint center" style="margin-top:-6px">Около <b>${r0(tk)} ккал</b> и <b>${r0(tp)} г белка</b>. Продукты можно менять на похожие.</p>
+    ${parts}
+    <p class="hint">Если пока тяжело съесть всё — начни с 3 основных приёмов и гейнера, а перекусы добавляй постепенно. Ешь по часам, даже без аппетита. Гейнер удобно пить после зала.</p>`;
+}
+
+function weightHTML() {
+  const F = S.food, today = F.weights.find(x => x.day === F.date);
+  const recent = F.weights.slice(-8).reverse();
+  return `<h3>Вес</h3>
+    <div class="field-row"><span>${humanDay(F.date).split(',')[0]}</span>
+      <input id="w-kg" class="field small" inputmode="decimal" placeholder="кг" value="${today ? today.kg : ''}"></div>
+    <button class="btn primary" data-act="wsave">Сохранить</button>
+    ${recent.length ? `<div class="sublabel">Последние записи</div><div class="card inset">${recent.map(x => `<div class="row"><div class="rmain">${humanDay(x.day).split(',')[0]}</div><b>${x.kg} кг</b></div>`).join('')}</div>` : ''}
+    <p class="hint">Цель: ${F.settings.goal_weight} кг. Нормальный темп набора — 0,3–0,5 кг в неделю.</p>`;
+}
+
+/* ───────── Спорт ───────── */
+function wkWhich(W) {
+  const todayMark = W.marks.find(k => k.startsWith('workout_'));
+  if (S.wkPick) return S.wkPick;
+  if (todayMark) return todayMark.slice(8);
+  const prev = W.history.filter(h => h.day < W.date);
+  if (!prev.length) return 'A';
+  return prev[prev.length - 1].key === 'workout_A' ? 'B' : 'A';
+}
+const setsStr = sets => sets.map(s => s.w ? `${s.w}×${s.r}` : `${s.r}`).join(', ');
+
+function viewSport() {
+  const W = S.wk;
+  if (!W) return loader();
+  const days = (W.settings.train_days || '').split(',').filter(Boolean).map(Number);
+  const isTrain = days.includes(wdOf(W.date));
+  const which = wkWhich(W), P = PROGRAM[which];
+  const doneKey = W.marks.find(k => k.startsWith('workout_'));
+  const [mon] = [addDays(W.date, -wdOf(W.date))];
+  const hist = new Set(W.history.map(h => h.day));
+  const week = WD.map((n, i) => {
+    const d = addDays(mon, i);
+    return `<div class="wd ${days.includes(i) ? 'td' : ''} ${hist.has(d) || (d === W.date && doneKey) ? 'ok' : ''} ${d === W.date ? 'cur' : ''}"><small>${n}</small><i>${hist.has(d) || (d === W.date && doneKey) ? ICON.check : ''}</i></div>`;
+  }).join('');
+  const weekDone = WD.filter((_, i) => hist.has(addDays(mon, i)) || (addDays(mon, i) === W.date && doneKey)).length;
+  const rows = P.items.map(([id, sets, reps]) => {
+    const E = EXERCISES[id], today = W.logs[id], last = W.last[id];
+    return `<div class="exrow ${today ? 'logged' : ''}" data-act="ex" data-id="${id}" data-sets="${sets}" data-reps="${reps}">
+      <img src="/assets/img/ex/${id}_1.jpg" alt="" loading="lazy">
+      <div class="rmain"><div class="rtitle">${E.name}</div>
+        <div class="rmeta"><span>${sets} × ${reps}</span></div>
+        <div class="rmeta last">${today ? `${ICON.check}<span>сегодня: ${setsStr(today)}</span>` : last ? `<span>прошлый раз: ${setsStr(last.sets)}</span>` : '<span>ещё не делал</span>'}</div>
+      </div>
+      <span class="chev">${ICON.right}</span></div>`;
+  }).join('');
+  return `${dayHead(W.date, W.today)}
+    <div class="card weekc"><div class="wk-h"><span>Эта неделя</span><b>${weekDone} из ${days.length || 3}</b></div><div class="wdays">${week}</div></div>
+    ${!isTrain && !doneKey ? '<p class="hint center">Сегодня по плану отдых. Мышцы растут именно во время отдыха — поешь и выспись 🙂</p>' : ''}
+    <div class="seg" style="margin-top:16px">
+      <button class="${which === 'A' ? 'on' : ''}" data-act="wkpick" data-k="A">Тренировка A</button>
+      <button class="${which === 'B' ? 'on' : ''}" data-act="wkpick" data-k="B">Тренировка B</button>
+    </div>
+    <div class="sec-h"><span>${P.name}</span><small>~50 мин</small></div>
+    <div class="card">${rows}</div>
+    <button class="btn ${doneKey ? '' : 'primary'}" data-act="wkdone" data-k="${which}">${doneKey ? ICON.check + 'Тренировка отмечена' : 'Завершить тренировку'}</button>
+    <div class="card tips">
+      <b>Как тренироваться</b>
+      <ul>
+        <li>Разминка 5–10 мин: дорожка или велосипед + 1–2 лёгких подхода первого упражнения.</li>
+        <li>Отдых между подходами 1,5–2 мин.</li>
+        <li>Тренировки A и B чередуются: A → B → A, на следующей неделе B → A → B.</li>
+        <li>Сделал все подходы на верхней границе повторов — в следующий раз добавь 2,5 кг (на гантелях — 1 кг).</li>
+        <li>Первые 2 недели бери лёгкий вес и учи технику. Боль в суставах — повод остановиться.</li>
+        <li>Без еды тренировки не дадут массы: после зала — гейнер или нормальный приём пищи.</li>
+      </ul>
+    </div>`;
+}
+
+function exSheetHTML(id, nSets, reps) {
+  const E = EXERCISES[id], W = S.wk, today = W.logs[id], last = W.last[id];
+  const base = today || (last ? last.sets : []);
+  const n = Math.max(nSets, base.length);
+  const isTime = /сек/.test(reps);
+  return `<h3>${E.name}</h3>
+    <div class="exanim"><img src="/assets/img/ex/${id}_0.jpg" alt=""><img src="/assets/img/ex/${id}_1.jpg" alt=""></div>
+    <div class="rmeta center" style="justify-content:center;margin:8px 0 2px"><span>${E.muscles} · ${nSets} × ${reps}</span></div>
+    <ul class="extips">${E.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>
+    <div class="sublabel">Подходы ${last && !today ? `<small>· прошлый раз ${humanDay(last.day).split(',')[0]}: ${setsStr(last.sets)}</small>` : ''}</div>
+    <div id="ex-sets">${Array.from({ length: n }, (_, i) => {
+      const s = base[i] || {};
+      return `<div class="setrow"><span>${i + 1}</span>
+        ${isTime ? '' : `<input class="field" inputmode="decimal" placeholder="кг" value="${s.w ?? ''}" data-w>`}
+        <input class="field" inputmode="numeric" placeholder="${isTime ? 'секунд' : 'повторы'}" value="${s.r ?? ''}" data-r></div>`;
+    }).join('')}</div>
+    <p class="hint">${today ? 'Сегодняшние подходы.' : last ? 'Подставлено с прошлого раза — поменяй на сегодняшние.' : 'Впиши вес и сколько раз сделал.'}</p>
+    <button class="btn primary" data-act="exsave" data-id="${id}">Сохранить</button>`;
+}
+
+/* ───────── Ещё и профиль ───────── */
+function viewMore() {
+  const item = (tab, icon, name, sub) => `<div class="row" data-act="tab" data-tab="${tab}"><span class="micon">${icon}</span><div class="rmain"><div class="rtitle">${name}</div><div class="rmeta"><span>${sub}</span></div></div><span class="chev">${ICON.right}</span></div>`;
+  return `<h1 class="title">Ещё</h1>
+    <div class="card">
+      ${item('month', ICON.cal, 'Месяц', 'таблица всех привычек')}
+      ${item('notes', ICON.note, 'Заметки', 'быстрые записи')}
+      ${item('habits', ICON.list, 'Привычки', 'добавить и изменить')}
+      ${item('profile', ICON.user, 'Профиль и цели', 'вес, рост, дни тренировок')}
+    </div>`;
+}
+
+function viewProfile() {
+  const st = S.settings;
+  if (!st) return loader();
+  const days = (st.train_days || '').split(',').filter(Boolean).map(Number);
+  const T = calcTargets(st, +st.start_weight);
+  const f = (id, label, v, unit) => `<div class="field-row"><span>${label}</span><div class="unit"><input id="${id}" class="field small" inputmode="decimal" value="${v}"><small>${unit}</small></div></div>`;
+  return `<h1 class="title">Профиль и цели</h1>
+    <div class="card pad">
+      ${f('p-age', 'Возраст', st.age, 'лет')}
+      ${f('p-height', 'Рост', st.height, 'см')}
+      ${f('p-start', 'Стартовый вес', st.start_weight, 'кг')}
+      ${f('p-goal', 'Цель', st.goal_weight, 'кг')}
+      <div class="sublabel">Город для времени намазов</div>
+      <div class="field-row"><span>Город</span><select id="p-city" class="sel">${Object.entries(CITY_NAMES).map(([k, n]) => `<option value="${k}" ${k === st.city ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+      <div class="sublabel">Поправка времени намаза, минут <small>· например +5 или −3</small></div>
+      ${FARD_KEYS.map(k => `<div class="field-row"><span>${PRAYER_LIST.find(p => p.key === k).name}</span><div class="unit"><input id="p-off-${k}" class="field small" inputmode="numeric" value="${+st['off_' + k] || 0}"><small>мин</small></div></div>`).join('')}
+      <div class="sublabel">Дни тренировок</div>
+      <div class="daypick">${WD.map((n, i) => `<button class="chip ${days.includes(i) ? 'on' : ''}" data-act="pday" data-i="${i}">${n}</button>`).join('')}</div>
+      <button class="btn primary" data-act="psave">Сохранить</button>
+    </div>
+    <p class="hint">При этих данных норма: <b>${T.kcal} ккал</b>, белок ${T.p} г, жиры ${T.f} г, углеводы ${T.c} г. Когда записываешь вес во вкладке «Еда», норма пересчитывается по последнему весу.</p>`;
+}
+
+/* ───────── действия ───────── */
+Object.assign(ACT, {
+  async mark(el) {
+    const view = S.tab === 'ibadah' ? S.ib : S.wk;
+    if (view.date > view.today) { toast('Будущий день нельзя отметить'); return; }
+    const key = el.dataset.key, M = new Set(view.marks), on = !M.has(key);
+    on ? M.add(key) : M.delete(key);
+    view.marks = [...M];
+    haptic(on ? 'medium' : 'light');
+    if (on && key.startsWith('fard_') && FARD_KEYS.every(k => M.has('fard_' + k))) hapticOk();
+    render();
+    try { view.marks = (await api('/api/marks/toggle', { key, day: view.date, on })).marks; } catch (e) { await reload(); }
+  },
+  async pnotify() {
+    const on = S.ib.settings.prayer_notify === '0';
+    S.ib.settings.prayer_notify = on ? '1' : '0';
+    haptic('light'); render();
+    try { await api('/api/settings', { prayer_notify: on }); } catch (e) { await reload(); return; }
+    toast(on ? 'Буду напоминать о намазе' : 'Напоминания о намазе выключены');
+  },
+
+  /* азкары */
+  azkar(el) { const set = el.dataset.set; S.azSet = set; openSheet(azkarSheetHTML(set)); },
+  azpref(el) { const p = lsGet('az:pref', { tr: true, ru: true }); p[el.dataset.k] = !p[el.dataset.k]; lsSet('az:pref', p); refreshSheet(azkarSheetHTML(S.azSet)); },
+  async zk(el) {
+    const set = el.dataset.set, id = el.dataset.id, day = S.ib.date, key = azKey(set, day);
+    const c = lsGet(key, {}), it = azkarItems(set).find(x => x.id === id);
+    if ((c[id] || 0) >= it.n) return;
+    c[id] = (c[id] || 0) + 1;
+    lsSet(key, c);
+    const done = c[id] >= it.n;
+    haptic(done ? 'heavy' : 'light');
+    refreshSheet(azkarSheetHTML(set));
+    if (done) {
+      const items = azkarItems(set), all = items.every(x => (c[x.id] || 0) >= x.n);
+      const i = items.findIndex(x => x.id === id), nx = items.slice(i + 1).find(x => (c[x.id] || 0) < x.n);
+      if (nx) setTimeout(() => { const e = $('#zk-' + nx.id); e && e.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 150);
+      if (all) {
+        hapticOk(); toast('Азкары прочитаны. Пусть Аллах примет!');
+        if (set !== 'ap' && S.ib.date <= S.ib.today) { try { S.ib.marks = (await api('/api/marks/toggle', { key: 'azkar_' + set, day, on: true })).marks; } catch (e) {} }
+      }
+    }
+    render();
+  },
+  async azreset(el) {
+    if (!(await confirmBox('Сбросить счётчики этого раздела?'))) return;
+    lsSet(azKey(el.dataset.set, S.ib.date), {});
+    refreshSheet(azkarSheetHTML(el.dataset.set)); render();
+  },
+
+  /* тасбих */
+  tasbih() { S.tb = S.tb || { preset: 'after', step: 0, count: 0 }; openSheet(tasbihHTML()); },
+  tbpreset(el) { S.tb = { preset: el.dataset.id, step: 0, count: 0 }; haptic('light'); refreshSheet(tasbihHTML()); },
+  tbtap() {
+    const T = S.tb, P = TASBIH.find(x => x.id === T.preset);
+    if (T.step >= P.seq.length) { T.step = 0; T.count = 0; refreshSheet(tasbihHTML()); return; }
+    T.count++;
+    const k = `tb:${S.ib ? S.ib.date : S.today}`; lsSet(k, lsGet(k, 0) + 1);
+    const goal = P.seq[T.step].n;
+    if (goal && T.count >= goal) {
+      T.step++; T.count = 0;
+      if (T.step >= P.seq.length) hapticOk(); else haptic('heavy');
+    } else haptic('light');
+    refreshSheet(tasbihHTML());
+  },
+  tbreset() { S.tb.step = 0; S.tb.count = 0; refreshSheet(tasbihHTML()); },
+
+  /* еда */
+  fadd(el) { S.pick = { meal: el.dataset.meal, food: null, qty: 1, custom: false }; openFoodSheet(); },
+  fpick(el) { S.pick.food = allFoods().find(f => f.id === el.dataset.id); S.pick.qty = 1; rerenderFoodSheet(); },
+  fqty(el) { S.pick.qty = Math.max(0.5, Math.min(10, S.pick.qty + +el.dataset.n)); rerenderFoodSheet(); },
+  fback() { S.pick.food = null; S.pick.custom = false; rerenderFoodSheet(); },
+  fcustom() { S.pick.custom = true; rerenderFoodSheet(); setTimeout(() => $('#c-name') && $('#c-name').focus(), 50); },
+  async fsave() {
+    const P = S.pick, f = P.food, meal = $('#f-meal').value;
+    try { await api('/api/food/add', { day: S.food.date, meal, name: f.name, qty: P.qty, kcal: f.kcal, protein: f.p, fat: f.f, carbs: f.c }); } catch (e) { return; }
+    closeSheet(); hapticOk(); toast(`+${r0(f.kcal * P.qty)} ккал`); await reload();
+  },
+  async fcsave() {
+    const v = id => $(id).value.trim().replace(',', '.');
+    const b = { name: v('#c-name'), portion: v('#c-portion') || '1 порция', kcal: v('#c-kcal') || 0, protein: v('#c-p') || 0, fat: v('#c-f') || 0, carbs: v('#c-c') || 0 };
+    if (!b.name) { $('#c-name').focus(); return; }
+    let r; try { r = await api('/api/food/custom', b); } catch (e) { return; }
+    S.food.custom.push({ id: r.id, name: b.name, portion: b.portion, kcal: +b.kcal, protein: +b.protein, fat: +b.fat, carbs: +b.carbs });
+    S.pick.custom = false; S.pick.food = allFoods().find(f => f.id === 'c' + r.id); S.pick.qty = 1;
+    rerenderFoodSheet(); hapticOk();
+  },
+  async fcdel(el) {
+    if (!(await confirmBox('Удалить продукт из списка?'))) return;
+    try { await api('/api/food/custom/delete', { id: +el.dataset.id }); } catch (e) { return; }
+    S.food.custom = S.food.custom.filter(c => c.id !== +el.dataset.id);
+    S.pick.food = null; rerenderFoodSheet();
+  },
+  async fdel(el) {
+    const it = S.food.items.find(x => x.id === +el.dataset.id);
+    if (!(await confirmBox(`Убрать «${it.name}» из дневника?`))) return;
+    try { await api('/api/food/delete', { id: it.id }); } catch (e) { return; }
+    await reload();
+  },
+  fplan() { openSheet(planHTML()); },
+  async fplanadd(el) {
+    const meal = el.dataset.meal;
+    const items = MEAL_PLAN[meal].map(([id, q]) => { const f = foodById(id); return { meal, name: f.name, qty: q, kcal: f.kcal, protein: f.p, fat: f.f, carbs: f.c }; });
+    try { await api('/api/food/add', { day: S.food.date, items }); } catch (e) { return; }
+    hapticOk(); toast('Добавлено в дневник'); el.textContent = 'Добавлено ✓'; el.disabled = true;
+    await loadFood(); render();
+  },
+  weight() { openSheet(weightHTML(), () => setTimeout(() => $('#w-kg').focus(), 320)); },
+  async wsave() {
+    const kg = $('#w-kg').value.trim().replace(',', '.');
+    try { await api('/api/weight', { day: S.food.date, kg }); } catch (e) { return; }
+    closeSheet(); hapticOk(); await reload();
+  },
+
+  /* спорт */
+  wkpick(el) { S.wkPick = el.dataset.k; haptic('light'); render(); },
+  ex(el) { openSheet(exSheetHTML(el.dataset.id, +el.dataset.sets, el.dataset.reps)); },
+  async exsave(el) {
+    const sets = $$('#ex-sets .setrow').map(r => {
+      const w = r.querySelector('[data-w]'), rr = r.querySelector('[data-r]');
+      return { w: w ? w.value.trim().replace(',', '.') : 0, r: rr.value.trim() };
+    }).filter(s => s.r !== '');
+    try { await api('/api/workout/log', { day: S.wk.date, ex: el.dataset.id, sets }); } catch (e) { return; }
+    closeSheet(); hapticOk(); await reload();
+  },
+  async wkdone(el) {
+    const W = S.wk;
+    if (W.date > W.today) { toast('Будущий день нельзя отметить'); return; }
+    const cur = W.marks.find(k => k.startsWith('workout_'));
+    const key = cur || 'workout_' + el.dataset.k, on = !cur;
+    try { await api('/api/marks/toggle', { key, day: W.date, on }); } catch (e) { return; }
+    if (on) { hapticOk(); toast('Красавчик! Тренировка засчитана 💪'); }
+    S.wkPick = null; await reload();
+  },
+
+  /* профиль */
+  pday(el) { el.classList.toggle('on'); haptic('light'); },
+  async psave() {
+    const v = id => $(id).value.trim().replace(',', '.');
+    const train_days = $$('.daypick .chip').map((b, i) => b.classList.contains('on') ? i : null).filter(x => x !== null).join(',');
+    const b = { age: v('#p-age'), height: v('#p-height'), start_weight: v('#p-start'), goal_weight: v('#p-goal'), train_days, city: $('#p-city').value };
+    FARD_KEYS.forEach(k => { b['off_' + k] = (v('#p-off-' + k) || '0').replace('−', '-').replace('+', ''); });
+    try { S.settings = await api('/api/settings', b); } catch (e) { return; }
+    S.ib = null;
+    hapticOk(); toast('Сохранено'); render();
+  },
+});
+
+Object.assign(ICON, {
+  tasbih: '<svg viewBox="0 0 24 24"><circle cx="12" cy="4.5" r="1.6"/><circle cx="17.3" cy="6.7" r="1.6"/><circle cx="19.5" cy="12" r="1.6"/><circle cx="17.3" cy="17.3" r="1.6"/><circle cx="6.7" cy="6.7" r="1.6"/><circle cx="4.5" cy="12" r="1.6"/><circle cx="6.7" cy="17.3" r="1.6"/><path d="M12 19.5v2.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01"/></svg>',
+  scale: '<svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="M8.5 9a5 5 0 0 1 7 0l-2.2 2.5"/></svg>',
+  note: '<svg viewBox="0 0 24 24"><path d="M6.5 3.5h7.5l4.5 4.5v12.5h-12z"/><path d="M14 3.5V8h4.5M9.5 12.5h5M9.5 16h5"/></svg>',
+  user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.8"/><path d="M4.5 20.5c1.2-3.8 4-5.5 7.5-5.5s6.3 1.7 7.5 5.5"/></svg>',
+});
 
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
