@@ -544,7 +544,7 @@ def set_mark(uid: int, day: str, key: str, on: bool):
     else:
         ex("DELETE FROM marks WHERE user_id=? AND day=? AND key=?", uid, day, key)
         if key.startswith("workout") and hid is not None:
-            others = q1("SELECT COUNT(*) n FROM marks WHERE user_id=? AND day=? AND key LIKE 'workout%'", uid, day)["n"]
+            others = q1("SELECT COUNT(*) n FROM marks WHERE user_id=? AND day=? AND key LIKE ?", uid, day, "workout%")["n"]
             if not others:
                 set_habit_done(hid, day, False)
 
@@ -977,8 +977,8 @@ async def api_workout(request):
     for r in q("SELECT ex, day, sets FROM workout_logs WHERE user_id=? AND day<? ORDER BY day DESC LIMIT 200", uid, day):
         last.setdefault(r["ex"], {"day": r["day"], "sets": json.loads(r["sets"])})
     since = (date.fromisoformat(day) - timedelta(days=90)).isoformat()
-    history = q("SELECT day, key FROM marks WHERE user_id=? AND key LIKE 'workout%' AND day>=? ORDER BY day",
-                uid, since)
+    history = q("SELECT day, key FROM marks WHERE user_id=? AND key LIKE ? AND day>=? ORDER BY day",
+                uid, "workout%", since)
     return web.json_response({"date": day, "today": today_str(), "logs": logs, "last": last,
                               "history": history, "marks": get_marks(uid, day), "settings": get_settings(uid)})
 
